@@ -111,7 +111,7 @@ def train_student(target_type):
     train_losses = []
     val_losses = []
 
-    for epoch in range(500):
+    for epoch in range(3000):
         student.train()
         opt.zero_grad()
         logits = student(X_train)
