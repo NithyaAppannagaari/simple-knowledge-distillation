@@ -25,6 +25,16 @@ def generate_data(n = 2000):
     return X, y
 
 X_train, y_train = generate_data(2000)
+
+val_frac = 0.2
+n_train = int((1-val_frac) * len(X_train))
+
+X_val = X_train[n_train:]
+y_val = y_train[n_train:]
+
+X_train = X_train[:n_train]
+y_train = y_train[:n_train]
+
 X_test, y_test = generate_data(1000)
 
 # 2. Calculate true conditional mean
@@ -35,6 +45,7 @@ def true_conditional_mean(x):
     logits = x @ w + b
     return torch.sigmoid(logits)
 
+y_val_bayes = (true_conditional_mean(X_val) > 0.5).long()
 y_train_bayes = (true_conditional_mean(X_train) > 0.5).long()
 
 class Teacher(nn.Module):
@@ -80,10 +91,16 @@ teacher.eval()
 # Step 4. Obtain distillation targets
 
 with torch.no_grad():
-    teacher_logits = teacher(X_train)
+    teacher_logits_train = teacher(X_train)
+    teacher_logits_val = teacher(X_val)
+
     T = 4
-    teacher_soft = F.softmax(teacher_logits / T, dim=1)
-    teacher_hard = teacher_soft.argmax(dim = 1)
+
+    teacher_soft_train = F.softmax(teacher_logits_train / T, dim=1)
+    teacher_soft_val = F.softmax(teacher_logits_val / T, dim = 1)
+
+    teacher_hard_train = teacher_soft_train.argmax(dim = 1)
+    teacher_hard_val = teacher_soft_val.argmax(dim = 1)
 
 # Step 5. Train Student model
 
@@ -91,69 +108,69 @@ def train_student(target_type):
     student = Student().to(device)
     opt = optim.Adam(student.parameters(), lr = 1e-3)
 
-    losses = []
-    accuracies = []
+    train_losses = []
+    val_losses = []
 
     for epoch in range(500):
+        student.train()
         opt.zero_grad()
         logits = student(X_train)
 
         if target_type == "teacher_hard":
-            loss = F.cross_entropy(logits, teacher_hard)
+            loss = F.cross_entropy(logits, teacher_hard_train)
         
         elif target_type == "bayes_hard":
             loss = F.cross_entropy(logits, y_train_bayes)
         
         elif target_type == "teacher_soft":
             log_probs = F.log_softmax(logits, dim = 1)
-            loss = F.kl_div(log_probs, teacher_soft, reduction = "batchmean")
+            loss = F.kl_div(log_probs, teacher_soft_train, reduction = "batchmean")
 
         loss.backward()
         opt.step()
 
-        losses.append(loss.item())
+        train_losses.append(loss.item())
 
-        # calculate accuracy
+        student.eval()
         with torch.no_grad():
-            preds = logits.argmax(dim = 1)
-            acc = (preds == y_train).float().mean().item()
-            accuracies.append(acc)
+            val_logits = student(X_val)
+
+            if target_type == "teacher_hard":
+                val_loss = F.cross_entropy(val_logits, teacher_hard_val)
+            
+            elif target_type == "bayes_hard":
+                val_loss = F.cross_entropy(val_logits, y_val_bayes)
+            
+            elif target_type == "teacher_soft":
+                val_log_probs = F.log_softmax(val_logits / T, dim = 1)
+                val_loss = F.kl_div(val_log_probs, teacher_soft_val, reduction = "batchmean")
+
+        val_losses.append(val_loss.item())
     
-    return student, losses, accuracies
+    return student, train_losses, val_losses
 
 # Case 1: Hard labels from teacher output
-model_a, loss_a, acc_a = train_student("teacher_hard")
+model_a, train_a, val_a = train_student("teacher_hard")
 
 # Case 2: Use hard labels but averaged from the true conditional mean
-model_b, loss_b, acc_b = train_student("bayes_hard")
+model_b, train_b, val_b = train_student("bayes_hard")
 
 # Case 3: Soft label
-model_c, loss_c, acc_c = train_student("teacher_soft")
+model_c, train_c, val_c = train_student("teacher_soft")
 
-# Step 6. Evaluate
-def evaluate(model):
-    with torch.no_grad():
-        logits = model(X_test)
-        preds = logits.argmax(dim = 1)
-        acc = (preds == y_test).float().mean()
-    return acc.item()
+plt.figure(figsize=(8,5))
 
-plt.figure()
-plt.plot(loss_a, label="Hard Labels")
-plt.plot(loss_b, label="Conditional Mean of Hard Labels")
-plt.plot(loss_c, label="Soft Labels")
-plt.title("Training Loss")
+plt.plot(train_a, label="Train - Hard Labels")
+plt.plot(val_a, '--', label="Val - Hard Labels")
+
+plt.plot(train_b, label="Train - Conditional Mean of Hard Labels")
+plt.plot(val_b, '--', label="Val - Conditional Mean of Hard Labels")
+
+plt.plot(train_c, label="Train - Soft Labels")
+plt.plot(val_c, '--', label="Val - Soft Labels")
+
+plt.title("Training vs Validation Loss")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
-plt.legend()
-plt.show()
-
-plt.figure()
-plt.plot(acc_a, label="Hard Labels")
-plt.plot(acc_b, label="Conditional Mean of Hard Labels")
-plt.plot(acc_c, label="Soft Labels")
-plt.title("Training Accuracy")
-plt.xlabel("Epoch")
-plt.ylabel("Accuracy")
 plt.legend()
 plt.show()
